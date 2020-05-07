@@ -1,0 +1,394 @@
+---
+title: 'Statistics 652: Statistical Learning and Prediction'
+author: "Chidambaram Allada"
+subtitle: Prediction of Departure Delay of Flights departing from NYC
+output:
+  word_document: default
+  pdf_document: default
+---
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE)
+
+```
+
+
+  APPENDIX
+  Software Details :
+  R-Version- 3.6.1 \n
+  LIst Of All Packages Required:\n
+1)library(tidyverse) \n
+2)library(nycflights13) \n
+3)library(lubridate) \n
+4)library(corrplot) \n
+5)library(corrgram)\n
+6)library(gam)\n
+7)library(gbm)\n
+8)library(xgboost)\n
+9)library(tree)
+10)library(randomForest)
+11)library(dplyr)\n
+
+Time to Knit : 
+  
+
+
+
+## Dataset
+Dataset being analyzed is data from the nycflights13 package
+
+
+
+
+```{r}
+library(tidyverse)
+library(nycflights13)
+library(lubridate)
+library(dplyr)
+library(corrplot)
+library(corrgram)
+library(randomForest)
+library(gam)
+library(gbm)
+library(xgboost)
+library(tree)
+
+#help(flights)
+#help(weather)
+#help(airports)
+#help(planes)
+fltrain <- read_csv("C:/Users/Chidu/Documents/fltrain.csv.gz")
+fl_test <- read_csv("C:/Users/Chidu/Documents/fltest.csv.gz")
+fltrain
+
+```
+
+
+```{r}
+dim(fltrain)
+```
+Dimension of Training Dataset
+
+
+
+## Handling of Missing data
+
+
+
+
+```{r}
+fl <- fltrain
+for(i in 1:ncol(fl)) {
+  if(typeof(fl[[i]]) == "character") {
+    fl[[i]] <- factor(fl[[i]])
+  }
+}
+
+```
+
+
+counting the missing values in each variable.
+
+```{r}
+missing_value_features <- function(x) { sum(is.na(x)) }
+sapply(fl,missing_value_features)
+```
+
+Discarding the variables that have more than 5% missing values which is around 10000.
+
+```{r}
+fl <- fl%>% select(-year.y,-type,-manufacturer,-model,-engines,-seats, -speed, -engine,-wind_gust,-pressure)
+summary(fl)
+dim(fl)
+
+```
+
+na.omit used to omit the missing values 
+
+```{r}
+fl <- na.omit(fl)
+dim(fl)
+summary(fl)
+
+```
+
+## Summaries of the response variable `dep_delay`
+
+The departure delays variable is highly right-skewed that is showed.
+
+```{r}
+range(fl$dep_delay)
+fivenum(fl$dep_delay)
+quantile(fl$dep_delay,probs = c(0,0.01,0.05,0.1,0.25,.5,.75,.90,.95,.99,1))
+mean(fl$dep_delay >= 60) # about 15,000 or 8% of flights
+```
+
+Top 10 delays.
+
+```{r}
+fl%>% arrange(desc(dep_delay)) %>% head(10) 
+```
+
+
+Summaries of departure delay by NYC airport:
+```{r}
+Q3 <- function(x) { quantile(x,probs=.75) }
+fl %>% group_by(origin) %>% 
+  summarize(n=n(),med_d = median(dep_delay),Q3_d = Q3(dep_delay), max_d = max(dep_delay)) %>% 
+  arrange(desc(Q3_d)) %>% head(10) 
+```
+
+Summaries of departure delay by airline (carrier).
+
+```{r}
+fl %>% group_by(carrier) %>% 
+  summarize(n=n(),med_d = median(dep_delay),Q3_d = Q3(dep_delay), max_d = max(dep_delay)) %>% 
+  arrange(desc(Q3_d)) %>% head(10) 
+fl %>% group_by(origin,carrier) %>% 
+  summarize(n=n(),med_d = median(dep_delay),Q3_d = Q3(dep_delay), max_d = max(dep_delay)) %>% 
+  arrange(desc(Q3_d)) %>% head(10) 
+fl %>% group_by(dest,carrier) %>% 
+  summarize(n=n(),med_d = median(dep_delay),Q3_d = Q3(dep_delay), max_d = max(dep_delay)) %>% 
+  arrange(desc(Q3_d)) %>% head(10) 
+```
+
+Summaries of departure delay by date:
+
+```{r}
+fl %>% group_by(month,day) %>% 
+  summarize(n=n(),med_d = mean(dep_delay),max_d = max(dep_delay)) %>% 
+  arrange(desc(med_d)) %>% head(10) # what happened on march 8?
+```
+
+
+Summaries of departure delay by precipitation:
+```{r}
+fl %>% mutate(haveprecip = factor(precip>0)) %>% group_by(haveprecip) %>% 
+  summarize(n=n(),med_d = median(dep_delay),Q3_d = Q3(dep_delay), max_d = max(dep_delay)) %>% 
+  arrange(desc(med_d)) %>% head(10) 
+```
+
+
+
+```{r}
+
+den <- nrow(fl)+1
+fl <- fl %>% mutate(dep_delay = rank(dep_delay)/den)
+ggplot(fl,aes(x=dep_delay)) + geom_histogram(binwidth=.01)
+
+```
+
+# Data Wrangling Part
+
+
+
+
+```{r}
+
+fl <- fl %>% 
+  mutate(dep_date = make_date(year.x,month,day)) %>% 
+  select(-year.x,-month,-day,-dep_time,-arr_time,-arr_delay,
+         -sched_arr_time,-tailnum,-flight,-name,-air_time,
+         -hour,-minute,-time_hour,-tz,-dst,-dest) %>%
+  mutate(precip = as.numeric(precip>0))
+corrplot(corrgram(fl),type = "upper", order = "hclust",tl.col = "black", tl.srt = 45)
+```
+
+
+## Relationship between `dep_delay` and quantitative predictors
+
+
+
+```{r,cache=TRUE, eval= FALSE}
+ggplot(fl,aes(x=dep_date,y=dep_delay)) + geom_point(alpha=.01) + geom_smooth()
+
+ggplot(fl,aes(x=sched_dep_time,y=dep_delay)) + geom_point(alpha=0.01) + geom_smooth()
+
+ggplot(fl,aes(x=distance,y=dep_delay)) + geom_point(alpha=0.01) + geom_smooth()
+ggplot(fl,aes(x=log(distance),y=dep_delay)) + geom_point(alpha=0.01) + geom_smooth()
+
+
+ggplot(fl,aes(x=temp,y=dep_delay)) + geom_point(alpha=0.01) + geom_smooth()
+
+ggplot(fl,aes(x=dewp,y=dep_delay)) + geom_point(alpha=0.01) + geom_smooth()
+
+
+```
+
+
+
+```{r,cache=TRUE}
+
+fl <- mutate(fl,logdistance = log(distance)) %>% select(-distance)
+fl <- mutate(fl,logalt = log(alt)) %>% select(-alt)
+
+```
+
+
+## Splitting the Training set into train and validation set for tuning of the parameters
+
+
+
+```{r}
+set.seed(123)
+tzone1 <- as.factor(fl$tzone)
+fl <- mutate(fl,tzone=tzone1)
+tr_size <- ceiling(2*nrow(fl)/3)
+train <- sample(1:nrow(fl),size=tr_size)
+fl_tr <- fl[train,]
+fl_te <- fl[-train,]
+
+var_dd <- var(fl_te$dep_delay)
+var_dd
+```
+
+## Transforming the Test data set as per the trained model 
+
+```{r}
+set.seed(9)
+
+for(j in 1:ncol(fl_test)) {
+  if(typeof(fl_test[[j]]) == "character") {
+    fl_test[[j]] <- factor(fl_test[[j]])
+  }
+}
+
+fl_test <- fl_test%>% select(-year.y,-type,-manufacturer,-model,-engines,-seats, -speed, -engine,-wind_gust,-pressure)
+fl_test <- na.omit(fl_test)
+dim(fl_test)
+den_test <- nrow(fl_test)+1
+fl_test <- fl_test %>% mutate(dep_delay = rank(dep_delay)/den_test)
+
+fl_test <- fl_test %>% 
+  mutate(dep_date = make_date(year.x,month,day)) %>% 
+  select(-year.x,-month,-day,-dep_time,-arr_time,-arr_delay,
+         -sched_arr_time,-tailnum,-flight,-name,-air_time,
+         -hour,-minute,-time_hour,-tz,-dst,-dest) %>%
+  mutate(precip = as.numeric(precip>0))
+
+fl_test <- mutate(fl_test,logdistance = log(distance)) %>% select(-distance)
+fl_test <- mutate(fl_test,logalt = log(alt)) %>% select(-alt)
+
+tzone2 <- as.factor(fl_test$tzone)
+carrier_test <-as.factor(fl_test$carrier)
+origin_test <- as.factor(fl_test$origin)
+fl_test <- mutate(fl_test,carrier=carrier_test,origin=origin_test,tzone=tzone2)
+
+dep_date_numeric_t <- as.numeric(fl_test$dep_date)
+dep_date_numeric_t <- dep_date_numeric_t - mean(dep_date_numeric_t)
+fl_test <- mutate(fl_test,dep_date = dep_date_numeric_t)
+
+
+
+```
+
+
+
+
+```{r,cache=TRUE, eval=FALSE}
+
+set.seed(67)
+form <- formula(dep_delay ~ s(dep_date) + s(sched_dep_time) + carrier + origin + tzone + s(logdistance) +
+                  s(temp) + s(dewp) + s(humid) + s(wind_dir) + s(wind_speed) + precip + s(visib))
+gam_fit <- gam(form, data=fl_tr,family=gaussian) 
+summary(gam_fit)
+plot(gam_fit,se=TRUE)
+gam_pred <- predict(gam_fit,newdata=fl_te)
+mse_gam <- mean((fl_te$dep_delay-gam_pred)^2)
+
+mse_gam
+abs(mse_gam - var_dd)/var_dd
+```
+
+
+
+
+```{r,cache=TRUE}
+
+dep_date_numeric <- as.numeric(fl_tr$dep_date)
+dep_date_numeric <- dep_date_numeric - mean(dep_date_numeric)
+fl_tr_tem <- mutate(fl_tr,dep_date = dep_date_numeric)
+
+dep_date_numeric <- as.numeric(fl_te$dep_date)
+dep_date_numeric <- dep_date_numeric - mean(dep_date_numeric)
+fl_te_tem <- mutate(fl_te,dep_date = dep_date_numeric)
+
+
+```
+
+
+
+```{r,cache=TRUE,eval=FALSE}
+
+set.seed(142)
+
+gbm_fit <-gbm(dep_delay ~ .,data=fl_tr_tem,distribution="gaussian",
+              n.trees = 2000, shrinkage = 0.2, interaction.depth = 3)
+summary(gbm_fit)
+
+gbm_pred <- predict(gbm_fit,newdata=fl_te_tem,n.trees = 2000)
+gbm_pred_test <- predict(gbm_fit,newdata=fl_test,n.trees = 2000)
+mse_gbm <- mean((fl_te$dep_delay-gbm_pred)^2)
+mse_gbm_test <- mean((fl_test$dep_delay-gbm_pred_test)^2)
+mse_gbm
+mse_gbm_test
+
+abs(mse_gbm - var_dd)/var_dd
+
+```
+
+
+
+Decision trees for regression
+```{r}
+
+set.seed(123)
+
+tree.model <- tree(dep_delay~., fl_tr_tem)
+summary(tree.model)
+plot(tree.model)
+text(tree.model,pretty=0)
+cv.model = cv.tree(tree.model)
+plot(cv.model$size,cv.model$dev, type = "b")
+```
+
+
+
+```{r}
+prune.model= prune.tree(tree.model, best=4)
+yhat=predict(prune.model, newdata=fl_te_tem)
+yhat_test = predict(prune.model, newdata=fl_test)
+mean((yhat-fl_te_tem$dep_delay)^2)
+mean((yhat_test-fl_test$dep_delay)^2)
+```
+
+Using Random Forest method for regression
+
+
+```{r, eval=FALSE}
+
+set.seed(432)
+fl_rf <- fl_tr_tem[1:35000,]
+bag.flights <- randomForest(fl_rf$dep_delay~., data=fl_rf,ntree=100, importance=TRUE,na.action=na.omit)
+bag.flights
+yhat.bag <- predict(bag.flights,newdata= fl_te_tem)
+yhat.bag_test <- predict(bag.flights, newdata=fl_test)
+mean((yhat.bag-fl_te_tem$dep_delay)^2)
+mean((yhat.bag_test -fl_test$dep_delay)^2)
+
+```
+```{r}
+
+set.seed(134)
+data.xg <- xgb.DMatrix(data=data.matrix(fl_tr_tem[-2]), label=fl_tr_tem$dep_delay)
+bst_dmatrix <- xgboost(data=data.xg, max.depth=10,eta = 0.3, nrounds=100, eval_metric ="rmse")
+bst_dmatrix
+data.val.xg <- xgb.DMatrix(data=data.matrix(fl_te_tem[-2]), label=fl_te_tem$dep_delay)
+data.test.xg <- xgb.DMatrix(data=data.matrix(fl_test[-2]), label=fl_test$dep_delay)
+pred <- predict(bst_dmatrix,data.val.xg)
+pred_test <- predict(bst_dmatrix,data.test.xg)
+xgb_val_mse <- mean((pred-fl_te_tem$dep_delay)^2)
+xgb_val_mse
+xgb_te_mse <- mean((pred_test-fl_test$dep_delay)^2)
+xgb_te_mse
+```
